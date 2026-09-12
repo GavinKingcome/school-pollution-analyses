@@ -145,7 +145,7 @@ The spatial modelling work draws on the following key resources:
 
 - **Backend:** Django, Python, PostgreSQL, PostGIS
 - **Frontend:** HTML, CSS, JavaScript, Leaflet (mapping)
-- **Deployment:** Linode VPS (migration from Heroku in progress)
+- **Deployment:** Heroku (live), migration to Linode VPS
 - **Data Processing:** Pandas, GeoPandas (planned)
 - **Spatial Analysis:** PyKrige, PySAL (planned)
 
