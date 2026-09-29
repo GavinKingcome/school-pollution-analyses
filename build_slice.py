@@ -116,6 +116,10 @@ def tidy_columns(df):
     df.columns = df.columns.str.strip()
     return df
 
+def norm_postcode(s):
+    """Uppercase, trim, collapse internal whitespace to one space."""
+    return s.str.upper().str.strip().str.replace(r"\s+", " ", regex=True)
+
 
 def require_columns(df, required, source_name):
     """Stop if any column the logic depends on is missing."""
@@ -318,6 +322,70 @@ if leftover:
     warn(f"{leftover} 'REDACTED' value(s) remain in columns not listed")
 
 
+# %%
+# ---------------------------------------------------------------------
+# NSPL: load the postcode -> coordinates lookup (six columns only).
+# ----------------------------------------------------------------------
+NSPL_FILE = RAW / "NSPL_MAY_2026/Data/NSPL_MAY_2026_UK.csv" 
+NSPL_COLS = ["pcds", "east1m", "north1m", "lat", "long", "lsoa21cd"]
+
+nspl = pd.read_csv(NSPL_FILE, usecols=NSPL_COLS)
+print(nspl.shape)
+
+
+# %%
+# ---------------------------------------------------------------------
+# Geocode prep: normalise postcodes on both sides, then count matches.
+# ---------------------------------------------------------------------
+nspl["pcds"] = norm_postcode(nspl["pcds"])
+sl_childcare["Postcode"] = norm_postcode(sl_childcare["Postcode"])
+
+matched = sl_childcare["Postcode"].isin(nspl["pcds"]).sum()
+with_postcode = sl_childcare["Postcode"].notna().sum()
+print(f"{matched} of {with_postcode} postcodes found in NSPL")
+
+# %%
+# ---------------------------------------------------------------------
+# Geocode: attach coordinates and LSOA to each provider by postcode.
+# ---------------------------------------------------------------------
+sl_childcare = sl_childcare.merge(
+    nspl,
+    how="left",
+    left_on="Postcode",
+    right_on="pcds",
+    validate="many_to_one",
+    indicator=True,
+)
+
+# Checks: everyone with a postcode got coordinates; nobody was duplicated.
+geocoded = (sl_childcare["_merge"] == "both").sum()
+unmatched = (
+    (sl_childcare["_merge"] == "left_only")
+    & sl_childcare["Postcode"].notna()
+).sum()
+print(f"geocoded {geocoded} providers; {unmatched} postcodes failed to match")
+if unmatched:
+    warn(f"{unmatched} postcode(s) not found in NSPL - inspect before trusting")
+require_rows(sl_childcare, MIN_CHILDCARE, "childcare after geocoding")
+
+# Tidy: pcds duplicates Postcode; _merge has served its purpose.
+sl_childcare = sl_childcare.drop(columns=["pcds", "_merge"])
+
+
+# %%
+# ----------------------------------------------------------------
+# Sanity: geocoded points must land in the Southwark/Lambeth area.
+# ----------------------------------------------------------------
+located = sl_childcare[sl_childcare["lat"].notna()]
+in_box = (
+    located["lat"].between(51.40, 51.55)
+    & located["long"].between(-0.15, 0.00)
+)
+if not in_box.all():
+    warn(f"{(~in_box).sum()} geocoded point(s) fall outside the study area box")
+else:
+    ok(f"all {len(located)} geocoded points inside the study area box")
+    
 # %%
 # ---------------------------------------------------------------------
 # Ofsted: save.
