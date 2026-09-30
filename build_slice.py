@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pandas as pd
 
+# %%
 # ---------------------------------------------------------------------
 # Settings. Everything I might want to change lives in this cell.
 # ---------------------------------------------------------------------
@@ -59,6 +60,10 @@ OFSTED_REQUIRED = [
     "Provider Early Years Register flag",
 ]
 
+# NSPL: load the postcode -> coordinates lookup (six columns only).
+NSPL_FILE = RAW / "NSPL_MAY_2026/Data/NSPL_MAY_2026_UK.csv"
+NSPL_COLS = ["pcds", "east1m", "north1m", "lat", "long", "lsoa21cd"]
+
 # Columns where Ofsted writes the literal text "REDACTED" for home-based
 # providers. Absence of any of these is a warning, not a fatal error.
 REDACTED_COLS = [
@@ -96,20 +101,18 @@ PROCESSED.mkdir(parents=True, exist_ok=True)
 class DataCheckError(Exception):
     """Raised when a source file is not what the script expects."""
 
-
+# ----Messages----
 def fail(message):
     """Stop the current cell with a clear message. Kernel stays alive."""
     raise DataCheckError(message)
 
-
 def warn(message):
     print(f"WARNING: {message}")
 
-
 def ok(message):
     print(f"  ok: {message}")
-
-
+    
+# ----Cleaners----
 def tidy_columns(df):
     """Strip stray whitespace from column names. Headers typed by hand
     often carry a trailing space that is invisible but breaks lookups."""
@@ -120,7 +123,7 @@ def norm_postcode(s):
     """Uppercase, trim, collapse internal whitespace to one space."""
     return s.str.upper().str.strip().str.replace(r"\s+", " ", regex=True)
 
-
+# ----Checks (these call fail() or ok())----
 def require_columns(df, required, source_name):
     """Stop if any column the logic depends on is missing."""
     missing = [c for c in required if c not in df.columns]
@@ -326,9 +329,6 @@ if leftover:
 # ---------------------------------------------------------------------
 # NSPL: load the postcode -> coordinates lookup (six columns only).
 # ----------------------------------------------------------------------
-NSPL_FILE = RAW / "NSPL_MAY_2026/Data/NSPL_MAY_2026_UK.csv" 
-NSPL_COLS = ["pcds", "east1m", "north1m", "lat", "long", "lsoa21cd"]
-
 nspl = pd.read_csv(NSPL_FILE, usecols=NSPL_COLS)
 print(nspl.shape)
 
