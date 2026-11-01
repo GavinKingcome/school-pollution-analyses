@@ -18,10 +18,10 @@ wrong answer. A failing cell raises an exception, so the kernel stays alive.
 """
 
 from pathlib import Path
+from pyproj import Transformer
 
 import pandas as pd
 
-# %%
 # ---------------------------------------------------------------------
 # Settings. Everything I might want to change lives in this cell.
 # ---------------------------------------------------------------------
@@ -58,6 +58,9 @@ GIAS_REQUIRED = [
 OFSTED_REQUIRED = [
     "Local authority",
     "Provider Early Years Register flag",
+    "Provider type",
+    "Provider URN",
+    "Postcode",
 ]
 
 # NSPL: load the postcode -> coordinates lookup (six columns only).
@@ -243,15 +246,6 @@ print(len(sl_schools), "open schools;", len(early), "with pre-reception provisio
 
 # %%
 # ---------------------------------------------------------------------
-# GIAS: save.
-# ---------------------------------------------------------------------
-schools_out = PROCESSED / "southwark_lambeth_schools.csv"
-sl_schools.to_csv(schools_out, index=False)
-print(f"wrote {len(sl_schools)} rows -> {schools_out}")
-
-
-# %%
-# ---------------------------------------------------------------------
 # Ofsted: load and check.
 # ---------------------------------------------------------------------
 require_file(OFSTED_FILE)
@@ -348,6 +342,9 @@ print(f"{matched} of {with_postcode} postcodes found in NSPL")
 # ---------------------------------------------------------------------
 # Geocode: attach coordinates and LSOA to each provider by postcode.
 # ---------------------------------------------------------------------
+if "lat" in sl_childcare.columns:   # guard against merge running twice
+    fail("Already geocoded. Re-run from the Ofsted filter cell first.")
+
 sl_childcare = sl_childcare.merge(
     nspl,
     how="left",
@@ -379,7 +376,7 @@ sl_childcare = sl_childcare.drop(columns=["pcds", "_merge"])
 located = sl_childcare[sl_childcare["lat"].notna()]
 in_box = (
     located["lat"].between(51.40, 51.55)
-    & located["long"].between(-0.15, 0.00)
+    & located["long"].between(-0.16, 0.00)
 )
 if not in_box.all():
     warn(f"{(~in_box).sum()} geocoded point(s) fall outside the study area box")
@@ -393,3 +390,56 @@ else:
 childcare_out = PROCESSED / "southwark_lambeth_childcare.csv"
 sl_childcare.to_csv(childcare_out, index=False)
 print(f"wrote {len(sl_childcare)} rows -> {childcare_out}")
+
+# %%
+# ---------------------------------------------------------------------
+# Schools: add 2021 LSOA (from NSPL) and lat/long (from GIAS easting/northing).
+# ---------------------------------------------------------------------
+if "lsoa21cd" in sl_schools.columns:
+    fail("Schools already geocoded. Re-run from the GIAS filter cell first.")
+
+require_columns(sl_schools, ["Postcode", "Easting", "Northing"], "GIAS")
+
+# LSOA: join on postcode, the same way as childcare.
+sl_schools["Postcode"] = norm_postcode(sl_schools["Postcode"])
+sl_schools = sl_schools.merge(
+    nspl[["pcds", "lsoa21cd"]],
+    how="left",
+    left_on="Postcode",
+    right_on="pcds",
+    validate="many_to_one",
+    indicator=True,
+)
+no_lsoa = (sl_schools["_merge"] == "left_only").sum()
+if no_lsoa:
+    warn(f"{no_lsoa} school postcode(s) not found in NSPL - no LSOA for them")
+sl_schools = sl_schools.drop(columns=["pcds", "_merge"])
+
+# Location: convert GIAS easting/northing (British National Grid) to lat/long.
+east = pd.to_numeric(sl_schools["Easting"], errors="coerce").replace(0, pd.NA)
+north = pd.to_numeric(sl_schools["Northing"], errors="coerce").replace(0, pd.NA)
+has_coords = east.notna() & north.notna()
+
+to_wgs84 = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
+lon, lat = to_wgs84.transform(
+    east[has_coords].astype(float).to_numpy(),
+    north[has_coords].astype(float).to_numpy(),
+)
+sl_schools.loc[has_coords, "lat"] = lat.round(6)
+sl_schools.loc[has_coords, "long"] = lon.round(6)
+
+missing = (~has_coords).sum()
+if missing:
+    warn(f"{missing} school(s) have no easting/northing - not mappable")
+
+require_rows(sl_schools, MIN_SCHOOLS, "schools after geocoding")
+ok(f"{has_coords.sum()} schools located, "
+   f"{sl_schools['lsoa21cd'].notna().sum()} with a 2021 LSOA")
+
+# %%
+# ---------------------------------------------------------------------
+# GIAS: save.
+# ---------------------------------------------------------------------
+schools_out = PROCESSED / "southwark_lambeth_schools.csv"
+sl_schools.to_csv(schools_out, index=False)
+print(f"wrote {len(sl_schools)} rows -> {schools_out}")
