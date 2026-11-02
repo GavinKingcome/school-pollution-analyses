@@ -21,6 +21,7 @@ from pathlib import Path
 from pyproj import Transformer
 
 import pandas as pd
+import numpy as np
 
 # ---------------------------------------------------------------------
 # Settings. Everything I might want to change lives in this cell.
@@ -66,6 +67,17 @@ OFSTED_REQUIRED = [
 # NSPL: load the postcode -> coordinates lookup (six columns only).
 NSPL_FILE = RAW / "NSPL_MAY_2026/Data/NSPL_MAY_2026_UK.csv"
 NSPL_COLS = ["pcds", "east1m", "north1m", "lat", "long", "lsoa21cd"]
+
+# LAEI 2022 modelled concentrations: 20 m grids in British National Grid metres.
+# The column names match the School model's fields.
+LAEI_DIR = RAW.parent / "LAEI" / "ASCII"
+LAEI_GRIDS = {
+    "no2_2022": "LAEI2022_V1_NO2.asc",
+    "nox_2022": "LAEI2022_V1_NOx.asc",
+    "pm25_2022": "LAEI2022_V1_PM25.asc",
+    "pm10_mean_2022": "LAEI2022_V1_PM10m.asc",
+    "pm10_days_2022": "LAEI2022_V1_PM10d.asc",
+}
 
 # Columns where Ofsted writes the literal text "REDACTED" for home-based
 # providers. Absence of any of these is a warning, not a fatal error.
@@ -181,7 +193,12 @@ def require_file(path):
 require_file(GIAS_FILE)
 
 # The GIAS extract is Windows-encoded (cp1252), not UTF-8.
-df = pd.read_csv(GIAS_FILE, encoding="cp1252", low_memory=False)
+df = pd.read_csv(
+    GIAS_FILE,
+    encoding="cp1252",
+    low_memory=False,
+    dtype={"URN": str, "TelephoneNum": str},
+)
 df = tidy_columns(df)
 print(f"loaded {len(df)} rows, {len(df.columns)} columns")
 
@@ -383,13 +400,6 @@ if not in_box.all():
 else:
     ok(f"all {len(located)} geocoded points inside the study area box")
     
-# %%
-# ---------------------------------------------------------------------
-# Ofsted: save.
-# ---------------------------------------------------------------------
-childcare_out = PROCESSED / "southwark_lambeth_childcare.csv"
-sl_childcare.to_csv(childcare_out, index=False)
-print(f"wrote {len(sl_childcare)} rows -> {childcare_out}")
 
 # %%
 # ---------------------------------------------------------------------
@@ -436,6 +446,75 @@ require_rows(sl_schools, MIN_SCHOOLS, "schools after geocoding")
 ok(f"{has_coords.sum()} schools located, "
    f"{sl_schools['lsoa21cd'].notna().sum()} with a 2021 LSOA")
 
+# %%
+# ---------------------------------------------------------------------
+# LAEI 2022: read each pollutant grid, then look up the 20 m square that
+# each located school and childcare setting falls in.
+# ---------------------------------------------------------------------
+def read_asc(path):
+    """Read an ESRI ASCII grid: a 6-line header, then rows of values, north first."""
+    header = {}
+    with open(path) as f:
+        for _ in range(6):
+            key, value = f.readline().split()
+            header[key.lower()] = float(value)
+    values = np.loadtxt(path, skiprows=6, dtype=np.float32)
+    expected = (int(header["nrows"]), int(header["ncols"]))
+    if values.shape != expected:
+        fail(f"{path.name}: grid is {values.shape}, header says {expected}")
+    return header, values
+
+
+def sample_grid(header, values, east, north):
+    """The value of the square each point falls in. NaN if outside the grid or no data."""
+    size = header["cellsize"]
+    col = (east - header["xllcorner"]) // size
+    row = header["nrows"] - 1 - (north - header["yllcorner"]) // size
+    inside = (
+        east.notna() & north.notna()
+        & col.between(0, header["ncols"] - 1)
+        & row.between(0, header["nrows"] - 1)
+    )
+    result = pd.Series(np.nan, index=east.index)
+    result[inside] = values[row[inside].astype(int), col[inside].astype(int)]
+    result[(result == header["nodata_value"]) | (result < 0)] = np.nan
+    return result.round(2)
+
+
+if "no2_2022" in sl_schools.columns:
+    fail("LAEI values already added. Re-run from the GIAS filter cell first.")
+
+for filename in LAEI_GRIDS.values():
+    require_file(LAEI_DIR / filename)
+
+# Schools: GIAS easting/northing (the building). Childcare: NSPL (postcode centre).
+school_e = pd.to_numeric(sl_schools["Easting"], errors="coerce").replace(0, np.nan)
+school_n = pd.to_numeric(sl_schools["Northing"], errors="coerce").replace(0, np.nan)
+care_e = pd.to_numeric(sl_childcare["east1m"], errors="coerce")
+care_n = pd.to_numeric(sl_childcare["north1m"], errors="coerce")
+
+for column, filename in LAEI_GRIDS.items():
+    print(f"reading {filename} ...")
+    header, values = read_asc(LAEI_DIR / filename)
+    sl_schools[column] = sample_grid(header, values, school_e, school_n)
+    sl_childcare[column] = sample_grid(header, values, care_e, care_n)
+
+schools_found = sl_schools["no2_2022"].notna().sum()
+care_located = care_e.notna().sum()
+care_found = sl_childcare["no2_2022"].notna().sum()
+
+ok(f"LAEI values for {schools_found} of {len(sl_schools)} schools")
+ok(f"LAEI values for {care_found} of {care_located} located childcare settings")
+if schools_found < len(sl_schools) or care_found < care_located:
+    warn("some located settings got no LAEI value - inspect before trusting")
+
+# %%
+# ---------------------------------------------------------------------
+# Ofsted: save.
+# ---------------------------------------------------------------------
+childcare_out = PROCESSED / "southwark_lambeth_childcare.csv"
+sl_childcare.to_csv(childcare_out, index=False)
+print(f"wrote {len(sl_childcare)} rows -> {childcare_out}")
 # %%
 # ---------------------------------------------------------------------
 # GIAS: save.
